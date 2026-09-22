@@ -68,7 +68,7 @@ class DiffusionGGUFLinearMethod(GGUFLinearMethod):
                         x, weight[start:end, :offset].contiguous(), weight_type
                     )
                 )
-            out = torch.cat(result, axis=1)
+            out = torch.cat(result, dim=-1)
         else:
             weight = layer.weight
             weight_type = layer.weight_type.weight_type
