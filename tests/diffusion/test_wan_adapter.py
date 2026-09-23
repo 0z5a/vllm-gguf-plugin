@@ -48,7 +48,7 @@ def test_wan_adapter_selection():
 
 
 @pytest.mark.parametrize("shape", [(2, 4), (2, 3, 4), (1, 2, 3, 4)])
-def test_mixed_qkv_concatenates_features(monkeypatch, shape):
+def test_mixed_qkv_preserves_feature_order(monkeypatch, shape):
     # Wan Q4_K_M stores Q/K as Q4_K and V as Q6_K.
     weight = torch.nn.Parameter(
         torch.arange(24, dtype=torch.float32).reshape(6, 4), requires_grad=False
@@ -66,8 +66,8 @@ def test_mixed_qkv_concatenates_features(monkeypatch, shape):
         ),
     )
     monkeypatch.setattr(
-        "vllm_gguf_plugin.quantization.diffusion_config.dequant_gemm_gguf",
-        lambda x, w, t: x @ w.T,
+        "vllm_gguf_plugin.quantization.diffusion_config.dequant_gguf",
+        lambda w, t, dtype: w,
     )
     x = torch.arange(torch.tensor(shape).prod().item(), dtype=torch.float32).reshape(
         shape
