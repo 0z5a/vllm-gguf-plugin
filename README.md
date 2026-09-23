@@ -136,6 +136,21 @@ weights. The text encoder, VAE, embedders and output projection retain dense
 weights. Q4_K_M mixes Q4_K and Q6_K projections; Q/K/V remain separate shards
 while loading into the fused self-attention projection.
 
-This example covers text-to-video with TI2V-5B. Dual-transformer A14B
-checkpoints require separate high-noise and low-noise weight sources and are
-not supported by this single-file adapter path.
+For `Wan-AI/Wan2.2-T2V-A14B-Diffusers`, provide the high-noise and low-noise
+GGUF files separately. The base checkpoint still supplies the text encoder,
+VAE, scheduler and configuration:
+
+```python
+omni = Omni(
+    model="/path/to/Wan2.2-T2V-A14B-Diffusers",
+    quantization_config={
+        "method": "gguf",
+        "gguf_model": {
+            "transformer": "/path/to/HighNoise/Wan2.2-T2V-A14B-HighNoise-Q4_K_M.gguf",
+            "transformer_2": "/path/to/LowNoise/Wan2.2-T2V-A14B-LowNoise-Q4_K_M.gguf",
+        },
+    },
+    enable_cpu_offload=True,
+    vae_use_tiling=True,
+)
+```

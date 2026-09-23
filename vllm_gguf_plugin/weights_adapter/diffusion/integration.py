@@ -22,7 +22,7 @@ from .loader import (
     get_gguf_model_from_config,
     is_gguf_quant_config,
     load_diffusion_gguf_weights,
-    resolve_gguf_model_path,
+    resolve_diffusion_gguf_adapters,
 )
 
 if TYPE_CHECKING:
@@ -149,8 +149,6 @@ def _patch_diffusers_loader() -> None:
 
         import torch
 
-        from . import get_diffusion_gguf_adapter
-
         target_device = torch.device(load_device)
         gguf_model = get_gguf_model_from_config(self.quant_config)
         if not gguf_model:
@@ -160,18 +158,19 @@ def _patch_diffusers_loader() -> None:
             if self.od_config.tf_model_config is not None
             else None
         )
-        gguf_file = resolve_gguf_model_path(
-            gguf_model=gguf_model,
-            revision=self.od_config.revision,
-            download_dir=self.load_config.download_dir,
-            ignore_patterns=self.load_config.ignore_patterns,
+        adapters = resolve_diffusion_gguf_adapters(
+            gguf_model,
+            self.od_config.model_class_name,
+            model_type,
+            self.od_config.revision,
+            self.load_config.download_dir,
+            self.load_config.ignore_patterns,
         )
-        adapter = get_diffusion_gguf_adapter(
-            gguf_file, self.od_config.model_class_name, model_type
-        )
-        _extend_unquantized_modules(
-            self.quant_config, adapter.unquantized_module_names()
-        )
+        for component, adapter in adapters.items():
+            names = adapter.unquantized_module_names()
+            if isinstance(gguf_model, dict):
+                names = tuple(f"{component}.{name}" for name in names)
+            _extend_unquantized_modules(self.quant_config, names)
 
         # Handle CPU offload — same logic as original load_model
         offload_after_quant = False

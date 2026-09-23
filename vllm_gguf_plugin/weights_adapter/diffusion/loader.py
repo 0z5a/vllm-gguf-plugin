@@ -23,6 +23,7 @@ from torch import nn
 from ... import ops
 from ...quantization.utils import UNQUANTIZED_TYPES
 from ...weight_utils import download_gguf, resolve_local_gguf
+from .base import DiffusionGGUFAdapter
 
 
 def get_diffusion_gguf_adapter(*args, **kwargs):
@@ -50,7 +51,7 @@ def is_gguf_quant_config(quant_config: object) -> bool:
     return isinstance(quant_config, dict) and quant_config.get("method") == "gguf"
 
 
-def get_gguf_model_from_config(quant_config: object) -> str | None:
+def get_gguf_model_from_config(quant_config: object) -> str | dict[str, str] | None:
     """Extract the ``gguf_model`` path from *quant_config*."""
     if quant_config is None:
         return None
@@ -101,10 +102,26 @@ def resolve_gguf_model_path(
     )
 
 
-def _is_gguf_source(source: DiffusionWeightSource, adapter: object) -> bool:
-    source_prefix = getattr(adapter, "source_prefix", "transformer.")
-    source_subfolder = getattr(adapter, "source_subfolder", "transformer")
-    return source.prefix == source_prefix or source.subfolder == source_subfolder
+def resolve_diffusion_gguf_adapters(
+    gguf_model: str | dict[str, str],
+    model_class_name: str | None,
+    model_type: str | None,
+    revision: str | None = None,
+    download_dir: str | None = None,
+    ignore_patterns: str | list[str] | None = None,
+) -> dict[str, DiffusionGGUFAdapter]:
+    references = gguf_model if isinstance(gguf_model, dict) else {"": gguf_model}
+    adapters = {}
+    for component, reference in references.items():
+        path = resolve_gguf_model_path(
+            gguf_model=reference,
+            revision=revision,
+            download_dir=download_dir,
+            ignore_patterns=ignore_patterns,
+        )
+        adapter = get_diffusion_gguf_adapter(path, model_class_name, model_type)
+        adapters[component or adapter.source_subfolder] = adapter
+    return adapters
 
 
 def _get_loadable_names(model: nn.Module) -> set[str]:
@@ -183,7 +200,7 @@ def _hf_weights_for_loadable_names(
 
 
 def load_diffusion_gguf_weights(
-    gguf_model: str,
+    gguf_model: str | dict[str, str],
     model: nn.Module,
     model_class_name: str | None,
     model_type: str | None,
@@ -205,7 +222,7 @@ def load_diffusion_gguf_weights(
 
     Args:
         gguf_model: GGUF model reference (local path, ``repo/file.gguf``, or
-            ``repo:quant_type``).
+            ``repo:quant_type``), or a mapping from component names to references.
         model: The ``nn.Module`` to load weights into.
         model_class_name: Model class name (e.g. ``"QwenImagePipeline"``).
         model_type: Model type string from config (e.g. ``"qwen_image"``).
@@ -219,18 +236,33 @@ def load_diffusion_gguf_weights(
     Returns:
         Set of loaded weight names.
     """
-    gguf_file = resolve_gguf_model_path(
-        gguf_model=gguf_model,
-        revision=revision,
-        download_dir=download_dir,
-        ignore_patterns=ignore_patterns,
+    adapters = resolve_diffusion_gguf_adapters(
+        gguf_model,
+        model_class_name,
+        model_type,
+        revision,
+        download_dir,
+        ignore_patterns,
     )
-    adapter = get_diffusion_gguf_adapter(gguf_file, model_class_name, model_type)
+    if model_class_name == "WanPipeline":
+        experts = {
+            s.subfolder
+            for s in sources
+            if s.subfolder in {"transformer", "transformer_2"}
+        }
+        missing = experts - adapters.keys()
+        if missing:
+            raise ValueError(
+                f"Missing GGUF checkpoint for Wan experts: {sorted(missing)}"
+            )
     loaded: set[str] = set()
     loadable_names: set[str] | None = None
 
     for source in sources:
-        if _is_gguf_source(source, adapter):
+        adapter = adapters.get(source.subfolder) or adapters.get(
+            source.prefix.removesuffix(".")
+        )
+        if adapter is not None:
             loadable_names = loadable_names or _get_loadable_names(model)
             gguf_iter = (
                 (source.prefix + name, tensor)

@@ -88,7 +88,7 @@ class DiffusionGGUFConfig(GGUFConfig):
 
     def __init__(
         self,
-        gguf_model: str | None = None,
+        gguf_model: str | dict[str, str] | None = None,
         unquantized_modules: list[str] | None = None,
     ) -> None:
         super().__init__(unquantized_modules=unquantized_modules or [])

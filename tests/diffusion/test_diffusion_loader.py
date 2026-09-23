@@ -22,6 +22,11 @@ from vllm_gguf_plugin.weights_adapter.diffusion import (
 pytestmark = [pytest.mark.cpu]
 
 
+class _FakeAdapter:
+    source_prefix = "transformer."
+    source_subfolder = "transformer"
+
+
 # ---- is_gguf_quant_config ----
 
 
@@ -120,7 +125,7 @@ def test_load_gguf_transformer_and_hf_non_transformer(monkeypatch: pytest.Monkey
     """Transformer loads from GGUF, VAE loads from HF callback."""
     model = _FakeModel()
 
-    class _Adapter:
+    class _Adapter(_FakeAdapter):
         def weights_iterator(self):
             yield "weight", torch.ones((2, 2))
             yield "bias", torch.zeros(2)
@@ -165,7 +170,7 @@ def test_load_gguf_does_not_fallback_to_hf_for_missing_transformer_weights(
     """A GGUF transformer source never loads missing weights from HF."""
     model = _FakeModel()
 
-    class _Adapter:
+    class _Adapter(_FakeAdapter):
         def weights_iterator(self):
             yield "weight", torch.ones((2, 2))
 
@@ -206,7 +211,7 @@ def test_load_gguf_restores_plain_weight_from_gguf_weight(
 ):
     model = _FakeModel()
 
-    class _Adapter:
+    class _Adapter(_FakeAdapter):
         def weights_iterator(self):
             yield "weight_type", torch.tensor(WeightType.F32)
             yield "weight", torch.full((2, 2), 3.0)
@@ -279,7 +284,7 @@ def test_load_gguf_passes_packed_shards_through_merged_mapping(
     model = _FakeMergedModel()
     packed = torch.zeros((2, 2), dtype=torch.uint8)
 
-    class _Adapter:
+    class _Adapter(_FakeAdapter):
         def weights_iterator(self):
             yield "w1.weight_type", torch.tensor(WeightType.Q4_0)
             yield "w3.weight_type", torch.tensor(WeightType.Q4_0)
@@ -313,7 +318,7 @@ def test_load_gguf_passes_packed_shards_through_merged_mapping(
 def test_load_gguf_source_is_selected_by_adapter(monkeypatch: pytest.MonkeyPatch):
     model = _FakeModel()
 
-    class _Adapter:
+    class _Adapter(_FakeAdapter):
         source_prefix = "vae."
         source_subfolder = "vae"
 
@@ -356,7 +361,7 @@ def test_load_gguf_skips_hf_when_complete(monkeypatch: pytest.MonkeyPatch):
     """No HF fallback when GGUF covers all transformer weights."""
     model = _FakeModel()
 
-    class _Adapter:
+    class _Adapter(_FakeAdapter):
         def weights_iterator(self):
             yield "weight", torch.ones((2, 2))
             yield "bias", torch.zeros(2, dtype=torch.float32)
@@ -390,3 +395,58 @@ def test_load_gguf_skips_hf_when_complete(monkeypatch: pytest.MonkeyPatch):
     assert "transformer.bias" in loaded
     # HF should be called for vae, but transformer hf should be skipped
     assert "vae" in hf_calls
+
+
+@pytest.mark.parametrize("missing_expert", [False, True])
+def test_wan_cascade_loads_distinct_gguf_experts(monkeypatch, missing_expert):
+    import vllm_gguf_plugin.weights_adapter.diffusion.loader as loader
+
+    model = _FakeModel()
+    model.transformer_2 = nn.Linear(2, 2)
+    hf_sources = []
+
+    class Adapter(_FakeAdapter):
+        def __init__(self, value):
+            self.value = value
+
+        def weights_iterator(self):
+            yield "weight", torch.full((2, 2), self.value)
+            yield "bias", torch.full((2,), self.value)
+
+    monkeypatch.setattr(
+        loader, "resolve_gguf_model_path", lambda **kw: kw["gguf_model"]
+    )
+    monkeypatch.setattr(
+        loader,
+        "get_diffusion_gguf_adapter",
+        lambda path, *args: Adapter(1.0 if path == "high.gguf" else 2.0),
+    )
+
+    def hf_weights(source):
+        hf_sources.append(source.subfolder)
+        yield "vae.weight", torch.full((2, 2), 3.0)
+
+    references = {"transformer": "high.gguf"}
+    if not missing_expert:
+        references["transformer_2"] = "low.gguf"
+    sources = _make_sources() + [
+        DiffusionWeightSource(prefix="transformer_2.", subfolder="transformer_2")
+    ]
+    kwargs = dict(
+        gguf_model=references,
+        model=model,
+        model_class_name="WanPipeline",
+        model_type="wan",
+        sources=sources,
+        hf_weights_fn=hf_weights,
+    )
+    if missing_expert:
+        with pytest.raises(ValueError, match="Missing GGUF checkpoint.*transformer_2"):
+            load_diffusion_gguf_weights(**kwargs)
+        assert hf_sources == []
+    else:
+        loaded = load_diffusion_gguf_weights(**kwargs)
+        assert torch.equal(model.transformer.weight, torch.ones(2, 2))
+        assert torch.equal(model.transformer_2.weight, torch.full((2, 2), 2.0))
+        assert "transformer_2.weight" in loaded
+        assert hf_sources == ["vae"]
